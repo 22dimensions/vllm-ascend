@@ -100,9 +100,6 @@ def apply_quantization_patch(quant_description):
                         "__init__", [wrapper_rmsnorm_init])
             apply_patch("vllm_ascend.ops.layernorm.AscendRMSNorm",
                         "forward_oot", [wrapper_rmsnorm_forward_oot])
-            apply_patch(
-                "vllm_ascend.ops.vocab_parallel_embedding.AscendVocabParallelEmbedding",
-                "__init__", [wrapper_vocab_parallel_embedding_init])
             break
     patched = True
     logger.info("Using the vLLM Ascend Quantization now!")
