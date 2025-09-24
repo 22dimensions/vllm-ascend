@@ -49,9 +49,6 @@ from vllm.model_executor.models.interfaces import (HasInnerState, IsHybrid,
                                                    SupportsLoRA, SupportsPP)
 from vllm.model_executor.models.mamba_cache import MambaCacheParams
 from vllm.model_executor.models.qwen2_moe import Qwen2MoeMLP as Qwen3NextMLP
-from vllm.model_executor.models.qwen3_next import (Qwen3NextAttention,
-                                                   Qwen3NextSparseMoeBlock,
-                                                   fused_gdn_gating)
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader, PPMissingLayer, extract_layer_index,
     is_pp_missing_parameter, make_empty_intermediate_tensors_factory,
@@ -63,8 +60,16 @@ from vllm.transformers_utils.configs import Qwen3NextConfig
 from vllm.utils import direct_register_custom_op
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
+from vllm.model_executor.models.qwen3_next import Qwen3NextAttention  # isort: skip
+from vllm.model_executor.models.qwen3_next import Qwen3NextDecoderLayer  # isort: skip
+from vllm.model_executor.models.qwen3_next import Qwen3NextForCausalLM  # isort: skip
+from vllm.model_executor.models.qwen3_next import Qwen3NextGatedDeltaNet  # isort: skip
+from vllm.model_executor.models.qwen3_next import Qwen3NextModel  # isort: skip
+from vllm.model_executor.models.qwen3_next import Qwen3NextSparseMoeBlock  # isort: skip
+from vllm.model_executor.models.qwen3_next import fused_gdn_gating  # isort: skip
 
-class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
+
+class CustomQwen3NextGatedDeltaNet(nn.Module, MambaBase):
 
     @property
     def mamba_type(self) -> str:
