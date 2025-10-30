@@ -8,7 +8,15 @@ from typing import Iterable, List, Optional, Tuple, Union
 import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.base import \
     KVConnectorMetadata
-from vllm.utils import cdiv, logger
+from vllm.utils import logger
+
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.11.1"):
+    from vllm.utils.math_utils import cdiv
+else:
+    from vllm.utils import cdiv
+
 from vllm.v1.core.sched.output import NewRequestData
 
 
