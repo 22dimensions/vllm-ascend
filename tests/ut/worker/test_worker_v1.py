@@ -46,7 +46,7 @@ class TestNPUWorker(TestBase):
     @patch("vllm_ascend.worker.worker_v1.init_ascend_config")
     @patch("vllm_ascend.worker.worker_v1.init_ascend_soc_version")
     @patch("vllm_ascend.worker.worker_v1.try_register_lib")
-    @patch("vllm.utils.init_cached_hf_modules")
+    @patch("vllm.utils.import_utils.init_cached_hf_modules")
     @patch("vllm_ascend.worker.worker_v1.NPUWorker._init_profiler")
     def test_init_npu_worker_normal_case(
         self,
@@ -108,7 +108,7 @@ class TestNPUWorker(TestBase):
     @patch("vllm_ascend.worker.worker_v1.init_ascend_config")
     @patch("vllm_ascend.worker.worker_v1.init_ascend_soc_version")
     @patch("vllm_ascend.worker.worker_v1.try_register_lib")
-    @patch("vllm.utils.init_cached_hf_modules")
+    @patch("vllm.utils.import_utils.init_cached_hf_modules")
     @patch("vllm_ascend.worker.worker_v1.NPUWorker._init_profiler")
     def test_init_npu_worker_with_trust_remote_code(
         self,
@@ -153,7 +153,7 @@ class TestNPUWorker(TestBase):
     @patch("vllm_ascend.worker.worker_v1.init_ascend_config")
     @patch("vllm_ascend.worker.worker_v1.init_ascend_soc_version")
     @patch("vllm_ascend.worker.worker_v1.try_register_lib")
-    @patch("vllm.utils.init_cached_hf_modules")
+    @patch("vllm.utils.import_utils.init_cached_hf_modules")
     @patch("vllm_ascend.worker.worker_v1.NPUWorker._init_profiler")
     def test_init_npu_worker_with_custom_cache_dtype(
         self,
