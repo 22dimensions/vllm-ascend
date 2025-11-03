@@ -14,7 +14,13 @@ from vllm.model_executor.model_loader.utils import \
     process_weights_after_loading
 from vllm.model_executor.models.deepseek_mtp import DeepSeekMTP
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
-from vllm.utils import cdiv
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.11.1"):
+    from vllm.utils.math_utils import cdiv
+else:
+    from vllm.utils import cdiv
+
 from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
                                               CommonAttentionMetadata)
 from vllm.v1.core.sched.output import SchedulerOutput
