@@ -8,6 +8,7 @@ single_npu_qwen2.5_vl
 single_npu_qwen2_audio
 single_npu_qwen3_embedding
 single_npu_qwen3_quantization
+Qwen3-32B.md
 multi_npu_qwen3_next
 multi_npu
 multi_npu_moge
