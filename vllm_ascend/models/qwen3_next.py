@@ -183,11 +183,98 @@ class CustomQwen3NextGatedDeltaNet(Qwen3NextGatedDeltaNet, MambaBase):
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
 
-    def _forward(
+    def forward(
         self,
         hidden_states: torch.Tensor,
         output: torch.Tensor,
     ):
+        """
+        Forward pass with three parts:
+        1. Input projection
+        2. Core attention (custom op)
+        3. Output projection
+        """
+        num_tokens = hidden_states.size(0)
+
+        # ============================================================
+        # Part 1: Input Projection
+        # ============================================================
+
+        forward_context = get_forward_context()
+        attn_metadata: AttentionMetadata = forward_context.attn_metadata
+
+        if attn_metadata is None:
+            # V1 profile run
+            return
+
+        assert isinstance(attn_metadata, dict)
+        attn_metadata = attn_metadata[self.prefix]
+        assert isinstance(attn_metadata, GDNAttentionMetadata)
+        if vllm_version_is("0.11.0"):
+            spec_token_masks = attn_metadata.spec_token_masks
+
+        num_actual_tokens = (attn_metadata.num_prefill_tokens +
+                             attn_metadata.num_decode_tokens +
+                             attn_metadata.num_spec_decode_tokens)
+
+        # 1. Set up dimensions for reshapes later
+        projected_states, _ = self.in_proj(hidden_states[:num_actual_tokens])
+        if vllm_version_is("0.11.0"):
+            if spec_token_masks is not None:
+                spec_token_masks = spec_token_masks[:num_actual_tokens]
+        projected_states_qkvz, projected_states_ba = torch.split(
+            projected_states,
+            [
+                self.projection_size_qkvz // self.tp_size,
+                self.projection_size_ba // self.tp_size
+            ],
+            dim=-1,
+        )
+        query, key, value, z, b, a = self.fix_query_key_value_ordering(
+            projected_states_qkvz, projected_states_ba)
+        query, key, value = map(lambda x: rearrange(x, 'l p d -> l (p d)'),
+                                (query, key, value))
+        mixed_qkv = torch.cat((query, key, value), dim=-1)
+
+        # ============================================================
+        # Part 2: Core Attention (Custom Op)
+        # ============================================================
+        core_attn_out = torch.zeros(
+            (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        )
+
+        torch.ops.vllm.gdn_attention_core(
+            mixed_qkv,
+            b,
+            a,
+            core_attn_out,
+            self.prefix,
+        )
+
+        # ============================================================
+        # Part 3: Output Projection
+        # ============================================================
+        z_shape_og = z.shape
+        # Reshape input data into 2D tensor
+        core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
+        z = z.reshape(-1, z.shape[-1])
+        core_attn_out = self.norm(core_attn_out, z)
+        core_attn_out = core_attn_out.reshape(z_shape_og)
+        core_attn_out = rearrange(core_attn_out, "... h d -> ... (h d)")
+        output[:num_tokens], _ = self.out_proj(core_attn_out)
+
+    def _forward_core(
+        self,
+        mixed_qkv: torch.Tensor,
+        b: torch.Tensor,
+        a: torch.Tensor,
+        core_attn_out: torch.Tensor,
+    ):
+        """
+        Core attention computation (called by custom op).
+        """
         forward_context = get_forward_context()
         attn_metadata: AttentionMetadata = forward_context.attn_metadata
 
@@ -219,26 +306,11 @@ class CustomQwen3NextGatedDeltaNet(Qwen3NextGatedDeltaNet, MambaBase):
                              attn_metadata.num_spec_decode_tokens)
         num_accepted_tokens = attn_metadata.num_accepted_tokens
 
-        # 1. Set up dimensions for reshapes later
-        projected_states, _ = self.in_proj(hidden_states[:num_actual_tokens])
-        if vllm_version_is("0.11.0"):
-            if spec_token_masks is not None:
-                spec_token_masks = spec_token_masks[:num_actual_tokens]
-        projected_states_qkvz, projected_states_ba = torch.split(
-            projected_states,
-            [
-                self.projection_size_qkvz // self.tp_size,
-                self.projection_size_ba // self.tp_size
-            ],
-            dim=-1,
-        )
-        query, key, value, z, b, a = self.fix_query_key_value_ordering(
-            projected_states_qkvz, projected_states_ba)
-        query, key, value = map(lambda x: rearrange(x, 'l p d -> l (p d)'),
-                                (query, key, value))
-        mixed_qkv = torch.cat((query, key, value), dim=-1)
+        mixed_qkv = mixed_qkv[:num_actual_tokens]
+        b = b[:num_actual_tokens]
+        a = a[:num_actual_tokens]
 
-        # 2. Convolution sequence transformation
+        # 1. Convolution sequence transformation
         conv_weights = self.conv1d.weight.view(self.conv1d.weight.size(0),
                                                self.conv1d.weight.size(2))
 
@@ -259,7 +331,7 @@ class CustomQwen3NextGatedDeltaNet(Qwen3NextGatedDeltaNet, MambaBase):
             mixed_qkv_spec = None
             mixed_qkv_non_spec = mixed_qkv
 
-        # 2.1: process the mutli-query part
+        # 1.1: Process the multi-query part
         if spec_sequence_masks is not None:
             mixed_qkv_spec = mixed_qkv_spec.view(
                 attn_metadata.num_spec_decodes, -1, mixed_qkv_spec.size(-1))
@@ -277,7 +349,7 @@ class CustomQwen3NextGatedDeltaNet(Qwen3NextGatedDeltaNet, MambaBase):
             )
             mixed_qkv_spec = rearrange(mixed_qkv_spec, 'b d l -> (b l) d')
 
-        # 2.2: process the remaining part
+        # 1.2: Process the remaining part
         if attn_metadata.num_prefills > 0:
             # - "cache_indices" updates the conv_state cache in positions
             #   pointed to by "mamba_cache_params.state_indices_tensor"
@@ -338,8 +410,9 @@ class CustomQwen3NextGatedDeltaNet(Qwen3NextGatedDeltaNet, MambaBase):
             g_non_spec = g
             beta_non_spec = beta
 
-        # 3. Recurrent attention
-        # 3.1: process the mutlti-query part
+        # 2. Recurrent attention
+
+        # 2.1: Process the multi-query part
         if spec_sequence_masks is not None:
             core_attn_out_spec, last_recurrent_state = (
                 fused_recurrent_gated_delta_rule(
@@ -431,36 +504,21 @@ class CustomQwen3NextGatedDeltaNet(Qwen3NextGatedDeltaNet, MambaBase):
         else:
             core_attn_out_non_spec, last_recurrent_state = None, None
 
-        # Merge core attention output
-        if (spec_sequence_masks is not None
-                and core_attn_out_non_spec is not None):
-            core_attn_out = torch.empty(
+        # 3. Merge core attention output
+        if spec_sequence_masks is not None and core_attn_out_non_spec is not None:
+            merged_out = torch.empty(
                 (1, num_actual_tokens, *core_attn_out_spec.shape[2:]),
                 dtype=core_attn_out_non_spec.dtype,
                 device=core_attn_out_non_spec.device,
             )
-            if vllm_version_is("0.11.0"):
-                core_attn_out[:, spec_token_masks] = core_attn_out_spec
-                core_attn_out[:, ~spec_token_masks] = core_attn_out_non_spec
-            else:
-                core_attn_out.index_copy_(1, spec_token_indx,
-                                          core_attn_out_spec)
-                core_attn_out.index_copy_(1, non_spec_token_indx,
-                                          core_attn_out_non_spec)
+            merged_out.index_copy_(1, spec_token_indx, core_attn_out_spec)
+            merged_out.index_copy_(1, non_spec_token_indx, core_attn_out_non_spec)
+            core_attn_out[:num_actual_tokens] = merged_out.squeeze(0)
         elif spec_sequence_masks is not None:
-            core_attn_out = core_attn_out_spec
+            core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)
         else:
-            core_attn_out = core_attn_out_non_spec
+            core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
 
-        z_shape_og = z.shape
-        # reshape input data into 2D tensor
-        core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
-        z = z.reshape(-1, z.shape[-1])
-        core_attn_out = self.norm(core_attn_out, z)
-        core_attn_out = core_attn_out.reshape(z_shape_og)
-        core_attn_out = rearrange(core_attn_out, '... h d -> ... (h d)')
-
-        output[:num_actual_tokens], _ = self.out_proj(core_attn_out)
 
 
 class CustomQwen3NextDecoderLayer(Qwen3NextDecoderLayer):
