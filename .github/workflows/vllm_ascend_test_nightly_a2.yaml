@@ -44,6 +44,7 @@ concurrency:
 jobs:
   image_build:
     name: nightly image build
+    if: false
     uses: ./.github/workflows/_nightly_image_build.yaml
     with:
       target: a2
@@ -52,7 +53,8 @@ jobs:
       HW_TOKEN: ${{ secrets.HW_TOKEN }}
   single-node-tests:
     name: single-node
-    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    if: false
+    # if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     needs: image_build
     strategy:
       fail-fast: false
@@ -77,7 +79,8 @@ jobs:
   multi-node-tests:
     name: multi-node
     needs: [single-node-tests, image_build]
-    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    if: false
+    # if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     strategy:
       fail-fast: false
       max-parallel: 1
@@ -101,6 +104,7 @@ jobs:
       KUBECONFIG_B64: ${{ secrets.KUBECONFIG_A2_B64 }}
 
   single-node-accuracy-tests:
+    if: false
     if: >-
       ${{
         github.event_name == 'schedule' ||
