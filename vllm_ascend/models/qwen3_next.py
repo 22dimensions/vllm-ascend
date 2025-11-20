@@ -230,6 +230,10 @@ class CustomQwen3NextGatedDeltaNet(Qwen3NextGatedDeltaNet, MambaBase):
             non_spec_token_indx = attn_metadata.non_spec_token_indx
         spec_state_indices_tensor = attn_metadata.spec_state_indices_tensor  # noqa: E501
         non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor  # noqa: E501
+        self_kv_cache = self.kv_cache[forward_context.virtual_engine]
+
+        conv_state = self_kv_cache[0].transpose(-1, -2)
+        ssm_state = self_kv_cache[1]
 
         num_actual_tokens = (attn_metadata.num_prefill_tokens +
                              attn_metadata.num_decode_tokens +
@@ -254,6 +258,7 @@ class CustomQwen3NextGatedDeltaNet(Qwen3NextGatedDeltaNet, MambaBase):
         query, key, value = map(lambda x: rearrange(x, 'l p d -> l (p d)'),
                                 (query, key, value))
         mixed_qkv = torch.cat((query, key, value), dim=-1)
+
         # =======part 2 =========
         core_attn_out = torch.zeros(
             (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
@@ -573,6 +578,7 @@ class CustomQwen3NextGatedDeltaNet(Qwen3NextGatedDeltaNet, MambaBase):
         """
         Core attention computation (called by custom op).
         """
+
         forward_context = get_forward_context()
         attn_metadata: AttentionMetadata = forward_context.attn_metadata
 
@@ -595,16 +601,7 @@ class CustomQwen3NextGatedDeltaNet(Qwen3NextGatedDeltaNet, MambaBase):
         spec_state_indices_tensor = attn_metadata.spec_state_indices_tensor  # noqa: E501
         non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor  # noqa: E501
 
-        num_actual_tokens = (attn_metadata.num_prefill_tokens +
-                             attn_metadata.num_decode_tokens +
-                             attn_metadata.num_spec_decode_tokens)
-        num_accepted_tokens = attn_metadata.num_accepted_tokens
-
-        self_kv_cache = self.kv_cache[forward_context.virtual_engine]
-
-        conv_state = self_kv_cache[0].transpose(-1, -2)
-        ssm_state = self_kv_cache[1]
-
+        # 2. Convolution sequence transformation
         conv_weights = self.conv1d.weight.view(self.conv1d.weight.size(0),
                                                self.conv1d.weight.size(2))
 
@@ -677,11 +674,8 @@ class CustomQwen3NextGatedDeltaNet(Qwen3NextGatedDeltaNet, MambaBase):
             mixed_qkv_non_spec)
 
         beta = b.sigmoid()
-        if vllm_version_is("0.11.0"):
-            g = fused_gdn_gating(self.A_log, a, self.dt_bias)
-            g, beta = map(lambda x: rearrange(x, 'l d -> 1 l d'), (g, beta))
-        else:
-            g, beta = fused_gdn_gating(self.A_log, a, b, self.dt_bias)
+        g = fused_gdn_gating(self.A_log, a, self.dt_bias)
+        g, beta = map(lambda x: rearrange(x, 'l d -> 1 l d'), (g, beta))
 
         if spec_sequence_masks is not None:
             if (attn_metadata.num_prefills == 0
@@ -801,19 +795,25 @@ class CustomQwen3NextGatedDeltaNet(Qwen3NextGatedDeltaNet, MambaBase):
             core_attn_out_non_spec, last_recurrent_state = None, None
 
         # Merge core attention output
-        if spec_sequence_masks is not None and core_attn_out_non_spec is not None:
-            merged_out = torch.empty(
+        if (spec_sequence_masks is not None
+                and core_attn_out_non_spec is not None):
+            core_attn_out = torch.empty(
                 (1, num_actual_tokens, *core_attn_out_spec.shape[2:]),
                 dtype=core_attn_out_non_spec.dtype,
                 device=core_attn_out_non_spec.device,
             )
-            merged_out.index_copy_(1, spec_token_indx, core_attn_out_spec)
-            merged_out.index_copy_(1, non_spec_token_indx, core_attn_out_non_spec)
-            core_attn_out[:num_actual_tokens] = merged_out.squeeze(0)
+            if vllm_version_is("0.11.0"):
+                core_attn_out[:, spec_token_masks] = core_attn_out_spec
+                core_attn_out[:, ~spec_token_masks] = core_attn_out_non_spec
+            else:
+                core_attn_out.index_copy_(1, spec_token_indx,
+                                          core_attn_out_spec)
+                core_attn_out.index_copy_(1, non_spec_token_indx,
+                                          core_attn_out_non_spec)
         elif spec_sequence_masks is not None:
-            core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)
+            core_attn_out = core_attn_out_spec
         else:
-            core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
+            core_attn_out = core_attn_out_non_spec
 
 
 class CustomQwen3NextDecoderLayer(Qwen3NextDecoderLayer):
